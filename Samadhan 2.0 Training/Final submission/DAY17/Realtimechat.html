@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-time Chat App</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        #chat-messages::-webkit-scrollbar {
+            width: 8px;
+        }
+        #chat-messages::-webkit-scrollbar-track {
+            background: #f1f5f9;
+        }
+        #chat-messages::-webkit-scrollbar-thumb {
+            background: #94a3b8;
+            border-radius: 4px;
+        }
+        #chat-messages::-webkit-scrollbar-thumb:hover {
+            background: #64748b;
+        }
+    </style>
+</head>
+<body class="bg-slate-100 flex items-center justify-center h-screen">
+
+    <div id="loading-spinner" class="flex items-center justify-center h-full">
+        <svg class="animate-spin -ml-1 mr-3 h-10 w-10 text-slate-700" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+        <span class="text-slate-700 text-xl">Connecting to chat...</span>
+    </div>
+
+    <div id="chat-container" class="hidden w-full h-full max-w-6xl max-h-[95vh] md:max-h-[800px] bg-white rounded-2xl shadow-2xl flex flex-col">
+        <!-- Header -->
+        <header class="bg-slate-800 text-white p-4 rounded-t-2xl flex justify-between items-center shadow-md">
+            <div>
+                <h1 class="text-xl md:text-2xl font-bold">Real-time Chat</h1>
+                <p id="user-id-display" class="text-xs text-slate-400 mt-1">Your User ID: <span class="font-mono"></span></p>
+            </div>
+            <div id="connection-status" class="flex items-center space-x-2">
+                 <div class="h-3 w-3 bg-green-500 rounded-full animate-pulse"></div>
+                 <span class="text-sm font-medium">Connected</span>
+            </div>
+        </header>
+
+        <div class="flex flex-grow overflow-hidden">
+            <!-- User List -->
+            <aside class="w-1/4 md:w-1/5 bg-slate-50 border-r border-slate-200 p-4 overflow-y-auto hidden md:block">
+                <h2 class="text-lg font-semibold text-slate-700 mb-4">Online Users</h2>
+                <ul id="user-list" class="space-y-3">
+                    <!-- User list items will be injected here -->
+                </ul>
+            </aside>
+
+            <!-- Main Chat Area -->
+            <main class="flex-1 flex flex-col">
+                <!-- Messages -->
+                <div id="chat-messages" class="flex-grow p-6 overflow-y-auto bg-slate-100/50">
+                    <!-- Messages will be appended here -->
+                </div>
+
+                <!-- Message Input Form -->
+                <div class="p-4 bg-white border-t border-slate-200">
+                    <form id="message-form" class="flex items-center space-x-4">
+                        <input id="message-input" type="text" placeholder="Type your message..." autocomplete="off" class="flex-grow p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-slate-500 focus:outline-none transition duration-200">
+                        <button type="submit" class="bg-slate-700 text-white font-semibold px-6 py-3 rounded-lg hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-500 focus:ring-offset-2 transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed">
+                            Send
+                        </button>
+                    </form>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- Firebase SDK -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, addDoc, onSnapshot, serverTimestamp, query, orderBy, setDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+
+        // --- Configuration ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-chat-app';
+        let firebaseConfig;
+        try {
+            firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        } catch (e) {
+            console.error("Could not parse Firebase config:", e);
+            displayError("Invalid Firebase configuration.");
+        }
+
+        if (!firebaseConfig) {
+             displayError("Firebase configuration is missing.");
+        }
+
+        // --- Firebase Initialization ---
+        let app, auth, db;
+        let currentUserId = null;
+        let messagesUnsubscribe = null;
+        let usersUnsubscribe = null;
+
+        // --- UI Elements ---
+        const chatContainer = document.getElementById('chat-container');
+        const loadingSpinner = document.getElementById('loading-spinner');
+        const messageForm = document.getElementById('message-form');
+        const messageInput = document.getElementById('message-input');
+        const chatMessages = document.getElementById('chat-messages');
+        const userList = document.getElementById('user-list');
+        const userIdDisplay = document.getElementById('user-id-display').querySelector('span');
+
+        function displayError(message) {
+            loadingSpinner.innerHTML = `<span class="text-red-500 text-xl font-bold">${message}</span>`;
+        }
+
+        async function initializeFirebase() {
+            if (!firebaseConfig) {
+                console.error("Firebase initialization stopped, config is missing or invalid.");
+                return;
+            }
+            try {
+                setLogLevel('debug');
+                app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        console.log("User is signed in with UID:", user.uid);
+                        currentUserId = user.uid;
+                        userIdDisplay.textContent = currentUserId;
+
+                        // Set up user presence
+                        await setupUserPresence();
+
+                        // Start listening for messages and users
+                        listenForMessages();
+                        listenForUsers();
+
+                        // Show chat and hide spinner
+                        loadingSpinner.classList.add('hidden');
+                        chatContainer.classList.remove('hidden');
+                    } else {
+                        console.log("User is signed out. Attempting to sign in...");
+                        signIn();
+                    }
+                });
+
+            } catch (error) {
+                console.error("Firebase initialization failed:", error);
+                displayError("Could not connect to chat service.");
+            }
+        }
+
+        async function signIn() {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                    console.log('Signed in with custom token.');
+                } else {
+                    await signInAnonymously(auth);
+                    console.log('Signed in anonymously.');
+                }
+            } catch (error) {
+                console.error("Sign-in failed:", error);
+                displayError("Authentication failed.");
+            }
+        }
+        
+        // --- Real-time Listeners ---
+
+        function listenForMessages() {
+            const messagesCollectionPath = `/artifacts/${appId}/public/data/messages`;
+            const q = query(collection(db, messagesCollectionPath), orderBy("timestamp", "asc"));
+
+            messagesUnsubscribe = onSnapshot(q, (snapshot) => {
+                snapshot.docChanges().forEach((change) => {
+                    if (change.type === "added") {
+                        const messageData = change.doc.data();
+                        renderMessage(messageData);
+                    }
+                });
+                scrollToBottom();
+            }, (error) => {
+                console.error("Error listening for messages:", error);
+            });
+        }
+
+        function listenForUsers() {
+            const usersCollectionPath = `/artifacts/${appId}/public/data/users`;
+            
+            usersUnsubscribe = onSnapshot(collection(db, usersCollectionPath), (snapshot) => {
+                userList.innerHTML = ''; // Clear current list
+                if (snapshot.empty) {
+                     userList.innerHTML = '<li class="text-slate-500 text-sm">No other users online.</li>';
+                } else {
+                    snapshot.forEach((doc) => {
+                        renderUser(doc.id);
+                    });
+                }
+            }, (error) => {
+                console.error("Error listening for users:", error);
+            });
+        }
+        
+        // --- Presence Management ---
+        
+        async function setupUserPresence() {
+            if (!currentUserId) return;
+            const userDocRef = doc(db, `/artifacts/${appId}/public/data/users/${currentUserId}`);
+            try {
+                // Set user as online
+                await setDoc(userDocRef, { status: "online", joinedAt: serverTimestamp() });
+                console.log(`User ${currentUserId} is now online.`);
+            } catch (error) {
+                console.error("Failed to set user presence:", error);
+            }
+        }
+        
+        async function goOffline() {
+             if (!currentUserId) return;
+             const userDocRef = doc(db, `/artifacts/${appId}/public/data/users/${currentUserId}`);
+             try {
+                 await deleteDoc(userDocRef);
+                 console.log(`User ${currentUserId} went offline.`);
+             } catch (error) {
+                 console.error("Failed to update user status to offline:", error);
+             }
+        }
+
+        // --- UI Rendering ---
+
+        function renderMessage(data) {
+            const { text, senderId, timestamp } = data;
+            const messageDiv = document.createElement('div');
+            const isCurrentUser = senderId === currentUserId;
+            const senderName = isCurrentUser ? 'You' : `User...${senderId.slice(-6)}`;
+            
+            let timeString = 'Sending...';
+            if (timestamp && timestamp.toDate) {
+                timeString = timestamp.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            }
+
+            messageDiv.innerHTML = `
+                <div class="flex ${isCurrentUser ? 'justify-end' : 'justify-start'} mb-4">
+                    <div class="max-w-xs lg:max-w-md px-4 py-3 rounded-2xl ${isCurrentUser ? 'bg-slate-700 text-white' : 'bg-white shadow-md'}">
+                        <div class="font-bold text-sm ${isCurrentUser ? 'text-slate-300' : 'text-slate-600'}">${senderName}</div>
+                        <p class="text-md mt-1">${text}</p>
+                        <div class="text-xs mt-2 text-right ${isCurrentUser ? 'text-slate-400' : 'text-slate-400'}">${timeString}</div>
+                    </div>
+                </div>
+            `;
+            chatMessages.appendChild(messageDiv);
+        }
+
+        function renderUser(userId) {
+            const userLi = document.createElement('li');
+            const isCurrentUser = userId === currentUserId;
+            
+            userLi.innerHTML = `
+                 <div class="flex items-center space-x-3">
+                    <span class="relative flex h-3 w-3">
+                        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                        <span class="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
+                    </span>
+                    <span class="font-mono text-sm text-slate-600 truncate">
+                        ...${userId.slice(-10)} ${isCurrentUser ? '(You)' : ''}
+                    </span>
+                 </div>
+            `;
+            userList.appendChild(userLi);
+        }
+
+        function scrollToBottom() {
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+        
+        // --- Event Handlers ---
+        
+        messageForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const messageText = messageInput.value.trim();
+
+            if (messageText && currentUserId) {
+                const messagesCollectionPath = `/artifacts/${appId}/public/data/messages`;
+                try {
+                    await addDoc(collection(db, messagesCollectionPath), {
+                        text: messageText,
+                        senderId: currentUserId,
+                        timestamp: serverTimestamp()
+                    });
+                    messageInput.value = '';
+                    scrollToBottom();
+                } catch (error) {
+                    console.error("Error sending message: ", error);
+                    alert("Could not send message. Please try again.");
+                }
+            }
+        });
+
+        // Handle user leaving the page
+        window.addEventListener('beforeunload', (e) => {
+            // This is not guaranteed to run, but it's the best we can do on the client-side
+            // for cleaning up presence.
+            if (currentUserId) {
+                goOffline();
+            }
+        });
+        
+        // --- Start the App ---
+        initializeFirebase();
+
+    </script>
+</body>
+</html>
+
